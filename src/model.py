@@ -6,6 +6,7 @@ from torch_geometric.data import Data
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from sklearn.preprocessing import LabelBinarizer
+from sklearn.model_selection import train_test_split
 import networkx as nx
 import pickle
 
@@ -190,9 +191,9 @@ class VASPTrainer:
         # Learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=50, gamma=0.5)
         
-    def create_data_splits(self, train_ratio=0.8, val_ratio=0.1, random_state=42):
+    def create_data_splits(self, train_ratio=0.6, val_ratio=0.2, random_state=1):
         """
-        Create train/validation/test splits.
+        Create stratified train/validation/test splits that maintain class distribution.
         
         Args:
             train_ratio (float): Ratio of training data
@@ -203,22 +204,65 @@ class VASPTrainer:
         np.random.seed(random_state)
         
         num_nodes = self.data.x.shape[0]
-        indices = torch.randperm(num_nodes)
+        test_ratio = 1.0 - train_ratio - val_ratio
         
-        train_size = int(train_ratio * num_nodes)
-        val_size = int(val_ratio * num_nodes)
+        # Get labels as numpy array
+        labels = self.data.y.cpu().numpy()
+        node_indices = np.arange(num_nodes)
         
+        # First split: separate training+validation from test
+        temp_indices, test_indices = train_test_split(
+            node_indices, 
+            test_size=test_ratio, 
+            stratify=labels,
+            random_state=random_state
+        )
+        
+        # Second split: separate training from validation
+        temp_labels = labels[temp_indices]
+        val_size_adjusted = val_ratio / (train_ratio + val_ratio)  # Adjust for remaining data
+        
+        train_indices, val_indices = train_test_split(
+            temp_indices,
+            test_size=val_size_adjusted,
+            stratify=temp_labels,
+            random_state=random_state
+        )
+        
+        # Create boolean masks
         self.train_mask = torch.zeros(num_nodes, dtype=torch.bool)
         self.val_mask = torch.zeros(num_nodes, dtype=torch.bool)
         self.test_mask = torch.zeros(num_nodes, dtype=torch.bool)
         
-        self.train_mask[indices[:train_size]] = True
-        self.val_mask[indices[train_size:train_size + val_size]] = True
-        self.test_mask[indices[train_size + val_size:]] = True
+        self.train_mask[train_indices] = True
+        self.val_mask[val_indices] = True
+        self.test_mask[test_indices] = True
         
         print(f"Train: {self.train_mask.sum()} nodes")
         print(f"Validation: {self.val_mask.sum()} nodes")
         print(f"Test: {self.test_mask.sum()} nodes")
+        
+        # Print class distribution for each split
+        self._print_split_distributions(labels)
+        
+    def _print_split_distributions(self, labels):
+        """
+        Print class distribution for each data split to verify stratification.
+        
+        Args:
+            labels (np.array): Array of all node labels
+        """
+        class_names = ['Low Risk', 'Medium Risk', 'High Risk']
+        
+        for split_name, mask in [('Train', self.train_mask), ('Validation', self.val_mask), ('Test', self.test_mask)]:
+            split_labels = labels[mask.cpu().numpy()]
+            unique, counts = np.unique(split_labels, return_counts=True)
+            total = len(split_labels)
+            
+            print(f"\n{split_name} Split Class Distribution:")
+            for class_id, count in zip(unique, counts):
+                percentage = (count / total) * 100
+                print(f"  {class_names[class_id]} (Class {class_id}): {count} ({percentage:.1f}%)")
         
     def train_epoch(self):
         """Train the model for one epoch."""
